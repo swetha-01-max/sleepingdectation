@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Sleep Alarm Detector</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0a0c10; --panel: #13161d; --border: #1f2430;
+    --green: #00e676; --red: #ff1744; --orange: #ff9100;
+    --text: #e8eaf0; --muted: #5c6070;
+  }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; padding: 24px 16px; gap: 20px;
+  }
+  header { text-align: center; }
+  header h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: 0.04em; }
+  header p  { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
+
+  .video-wrap {
+    position: relative; width: 100%; max-width: 700px;
+    border-radius: 16px; overflow: hidden;
+    border: 1px solid var(--border); background: #000; aspect-ratio: 16/9;
+  }
+  #video   { width: 100%; height: 100%; object-fit: cover; display: block; transform: scaleX(-1); }
+  #overlay { position: absolute; inset: 0; pointer-events: none; width: 100%; height: 100%; }
+
+  #status-badge {
+    position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+    padding: 8px 24px; border-radius: 999px; font-size: 0.9rem; font-weight: 700;
+    letter-spacing: 0.06em; white-space: nowrap; border: 2px solid transparent;
+    z-index: 10; transition: all 0.2s;
+  }
+  #status-badge.awake  { background: rgba(0,230,118,0.15); color: var(--green); border-color: var(--green); }
+  #status-badge.sleepy { background: rgba(255,145,0,0.15);  color: var(--orange); border-color: var(--orange); }
+  #status-badge.alarm  { background: rgba(255,23,68,0.25);  color: var(--red); border-color: var(--red); animation: pulse-badge 0.5s infinite alternate; }
+  #status-badge.init   { background: rgba(255,255,255,0.05); color: var(--muted); border-color: var(--border); }
+  @keyframes pulse-badge {
+    from { box-shadow: 0 0 0 0 rgba(255,23,68,0.5); }
+    to   { box-shadow: 0 0 0 10px rgba(255,23,68,0); }
+  }
+
+  #alarm-flash { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+  #alarm-flash.active { animation: flash 0.4s infinite alternate; }
+  @keyframes flash {
+    from { background: rgba(255,23,68,0.0); }
+    to   { background: rgba(255,23,68,0.22); }
+  }
+
+  #no-face {
+    position: absolute; inset: 0; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.45); z-index: 8;
+  }
+  #no-face span {
+    color: #80d8ff; font-size: 1rem; font-weight: 600;
+    background: rgba(0,0,0,0.6); padding: 10px 20px;
+    border-radius: 999px; border: 1px solid #80d8ff44;
+  }
+  #no-face.show { display: flex; }
+
+  .stats {
+    width: 100%; max-width: 700px;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+  }
+  .stat-card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .stat-card .label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+  .stat-card .value { font-size: 1.4rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #ear-val    { color: var(--green); }
+  #timer-val  { color: var(--orange); }
+  #alarms-val { color: var(--red); }
+
+  .progress-wrap { width: 100%; max-width: 700px; }
+  .progress-label { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--muted); margin-bottom: 6px; }
+  .progress-track { height: 6px; background: var(--border); border-radius: 999px; overflow: hidden; }
+  #progress-bar   { height: 100%; width: 0%; background: linear-gradient(90deg, var(--orange), var(--red)); border-radius: 999px; transition: width 0.1s linear; }
+
+  .controls { width: 100%; max-width: 700px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .ctrl-group {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 16px; flex: 1; min-width: 180px;
+  }
+  .ctrl-group label { display: block; font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+  .ctrl-group .row  { display: flex; align-items: center; gap: 10px; }
+  input[type=range] { flex: 1; accent-color: var(--green); cursor: pointer; }
+  .ctrl-group .val-display { font-size: 0.9rem; font-weight: 700; color: var(--text); min-width: 36px; text-align: right; }
+
+  /* Sound test button */
+  #test-sound-btn {
+    background: var(--panel); border: 1px solid var(--orange);
+    color: var(--orange); border-radius: 8px; padding: 8px 16px;
+    font-size: 0.85rem; font-weight: 600; cursor: pointer;
+    transition: background 0.15s;
+  }
+  #test-sound-btn:hover { background: rgba(255,145,0,0.1); }
+
+  #start-btn {
+    width: 100%; max-width: 700px; padding: 14px;
+    background: var(--green); color: #000; border: none;
+    border-radius: 12px; font-size: 1rem; font-weight: 700;
+    cursor: pointer; letter-spacing: 0.04em;
+    transition: opacity 0.15s, transform 0.1s;
+  }
+  #start-btn:hover   { opacity: 0.9; transform: translateY(-1px); }
+  #start-btn:active  { transform: translateY(0); }
+  #start-btn:disabled{ opacity: 0.4; cursor: not-allowed; transform: none; }
+  #loader { font-size: 0.85rem; color: var(--muted); text-align: center; }
+
+  #sound-status {
+    font-size: 0.8rem; padding: 6px 12px; border-radius: 6px;
+    background: rgba(255,145,0,0.1); color: var(--orange);
+    border: 1px solid rgba(255,145,0,0.3); display: none;
+  }
+  #sound-status.ok { background: rgba(0,230,118,0.1); color: var(--green); border-color: rgba(0,230,118,0.3); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>😴 Sleep Alarm Detector</h1>
+  <p>"Whenever you close your eyes, an alarm sound starts playing."</p>
+</header>
+
+<div class="video-wrap">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+  <div id="alarm-flash"></div>
+  <div id="status-badge" class="init">⏳ Loading…</div>
+  <div id="no-face"><span>👤 Face detect avatledhu</span></div>
+</div>
+
+<div class="stats">
+  <div class="stat-card">
+    <span class="label">Eye Openness (EAR)</span>
+    <span class="value" id="ear-val">—</span>
+  </div>
+  <div class="stat-card">
+    <span class="label">Eyes Closed</span>
+    <span class="value" id="timer-val">0.0s</span>
+  </div>
+  <div class="stat-card">
+    <span class="label">Alarms Fired</span>
+    <span class="value" id="alarms-val">0</span>
+  </div>
+</div>
+
+<div class="progress-wrap">
+  <div class="progress-label">
+    <span>Eyes closed progress</span>
+    <span id="progress-text">0.0s / 2.5s</span>
+  </div>
+  <div class="progress-track"><div id="progress-bar"></div></div>
+</div>
+
+<div class="controls">
+  <div class="ctrl-group">
+    <label>EAR Threshold (eye sensitivity)</label>
+    <div class="row">
+      <input type="range" id="ear-thresh" min="0.10" max="0.35" step="0.01" value="0.22">
+      <span class="val-display" id="ear-thresh-val">0.22</span>
+    </div>
+  </div>
+  <div class="ctrl-group">
+    <label>Alarm delay (seconds)</label>
+    <div class="row">
+      <input type="range" id="delay-slider" min="1" max="10" step="0.5" value="2.5">
+      <span class="val-display" id="delay-val">2.5s</span>
+    </div>
+  </div>
+</div>
+
+<div style="display:flex;gap:10px;align-items:center;width:100%;max-width:700px;">
+  <button id="test-sound-btn">🔔 Sound Test</button>
+  <span id="sound-status"></span>
+</div>
+
+<button id="start-btn" disabled>Loading model…</button>
+<p id="loader">MediaPipe model load avutundi…</p>
+
+<script>
+// ── Config ─────────────────────────────────────────────────────────────────
+let EAR_THRESHOLD      = 0.22;
+let EYE_CLOSED_SECONDS = 2.5;
+
+const LEFT_EYE  = [362, 385, 387, 263, 373, 380];
+const RIGHT_EYE = [33,  160, 158, 133, 153, 144];
+
+// ── State ──────────────────────────────────────────────────────────────────
+let eyeClosedStart = null;
+let alarmActive    = false;
+let alarmCount     = 0;
+let running        = false;
+let animId         = null;
+let faceMesh       = null;
+
+// AudioContext — created ONCE on first user click, reused forever
+let audioCtx = null;
+
+function getAudioCtx() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+  return audioCtx;
+}
+
+// ── Alarm: repeating beep pattern via scheduled oscillator ─────────────────
+let alarmInterval = null;
+
+function beepOnce(freq, duration, startTime) {
+  const ac   = getAudioCtx();
+  const osc  = ac.createOscillator();
+  const gain = ac.createGain();
+
+  osc.type = 'square';
+  osc.frequency.value = freq;
+
+  // Envelope: quick fade in, sustain, quick fade out
+  gain.gain.setValueAtTime(0, startTime);
+  gain.gain.linearRampToValueAtTime(0.35, startTime + 0.01);
+  gain.gain.setValueAtTime(0.35, startTime + duration - 0.02);
+  gain.gain.linearRampToValueAtTime(0, startTime + duration);
+
+  osc.connect(gain);
+  gain.connect(ac.destination);
+  osc.start(startTime);
+  osc.stop(startTime + duration);
+}
+
+function playAlarmPattern() {
+  const ac = getAudioCtx();
+  const t  = ac.currentTime;
+  // Three rising beeps: 660 → 880 → 1100
+  beepOnce(660,  0.18, t);
+  beepOnce(880,  0.18, t + 0.22);
+  beepOnce(1100, 0.25, t + 0.44);
+}
+
+function startAlarm() {
+  if (alarmInterval) return;
+  playAlarmPattern();                        // immediate first burst
+  alarmInterval = setInterval(playAlarmPattern, 1200); // repeat every 1.2s
+}
+
+function stopAlarm() {
+  if (alarmInterval) { clearInterval(alarmInterval); alarmInterval = null; }
+}
+
+// ── DOM ────────────────────────────────────────────────────────────────────
+const video       = document.getElementById('video');
+const canvas      = document.getElementById('overlay');
+const ctx2d       = canvas.getContext('2d');
+const badge       = document.getElementById('status-badge');
+const noFaceDiv   = document.getElementById('no-face');
+const flash       = document.getElementById('alarm-flash');
+const earVal      = document.getElementById('ear-val');
+const timerVal    = document.getElementById('timer-val');
+const alarmsVal   = document.getElementById('alarms-val');
+const progressBar = document.getElementById('progress-bar');
+const progressTxt = document.getElementById('progress-text');
+const startBtn    = document.getElementById('start-btn');
+const loaderTxt   = document.getElementById('loader');
+const soundStatus = document.getElementById('sound-status');
+
+// ── Controls ───────────────────────────────────────────────────────────────
+document.getElementById('ear-thresh').addEventListener('input', e => {
+  EAR_THRESHOLD = parseFloat(e.target.value);
+  document.getElementById('ear-thresh-val').textContent = EAR_THRESHOLD.toFixed(2);
+});
+document.getElementById('delay-slider').addEventListener('input', e => {
+  EYE_CLOSED_SECONDS = parseFloat(e.target.value);
+  document.getElementById('delay-val').textContent = EYE_CLOSED_SECONDS.toFixed(1) + 's';
+});
+
+// Sound test button — also warms up AudioContext
+document.getElementById('test-sound-btn').addEventListener('click', () => {
+  playAlarmPattern();
+  soundStatus.textContent = '✅ Sound working!';
+  soundStatus.className   = 'ok';
+  soundStatus.style.display = 'inline-block';
+  setTimeout(() => { soundStatus.style.display = 'none'; }, 3000);
+});
+
+// ── EAR calculation ────────────────────────────────────────────────────────
+function eyeAspectRatio(lms, indices) {
+  const pts = indices.map(i => lms[i]);
+  if (pts.some(p => !p)) return 1.0;
+  const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const A = d(pts[1], pts[5]);
+  const B = d(pts[2], pts[4]);
+  const C = d(pts[0], pts[3]);
+  return (A + B) / (2.0 * C);
+}
+
+// ── Draw eye outline ───────────────────────────────────────────────────────
+function drawEye(lms, indices, color, W, H) {
+  ctx2d.beginPath();
+  indices.forEach((idx, n) => {
+    const p = lms[idx];
+    if (!p) return;
+    const x = (1 - p.x) * W;  // mirror to match CSS scaleX(-1)
+    const y = p.y * H;
+    n === 0 ? ctx2d.moveTo(x, y) : ctx2d.lineTo(x, y);
+  });
+  ctx2d.closePath();
+  ctx2d.strokeStyle = color;
+  ctx2d.lineWidth = 2.5;
+  ctx2d.stroke();
+  ctx2d.fillStyle = color + '44';
+  ctx2d.fill();
+}
+
+// ── MediaPipe results callback ─────────────────────────────────────────────
+function onResults(results) {
+  canvas.width  = video.videoWidth  || video.clientWidth;
+  canvas.height = video.videoHeight || video.clientHeight;
+  ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+
+  const W = canvas.width;
+  const H = canvas.height;
+
+  if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+    noFaceDiv.classList.add('show');
+    eyeClosedStart = null;
+    if (alarmActive) { alarmActive = false; stopAlarm(); }
+    setStatus('init', '👤 Face detect avvaledhu');
+    updateStats(1.0, 0);
+    return;
+  }
+
+  noFaceDiv.classList.remove('show');
+  const lms  = results.multiFaceLandmarks[0];
+  const earL = eyeAspectRatio(lms, LEFT_EYE);
+  const earR = eyeAspectRatio(lms, RIGHT_EYE);
+  const ear  = (earL + earR) / 2.0;
+
+  const eyeColor = alarmActive ? '#ff1744' : '#00e676';
+  drawEye(lms, LEFT_EYE,  eyeColor, W, H);
+  drawEye(lms, RIGHT_EYE, eyeColor, W, H);
+
+  const now        = performance.now() / 1000;
+  const eyesClosed = ear < EAR_THRESHOLD;
+
+  if (eyesClosed) {
+    if (eyeClosedStart === null) eyeClosedStart = now;
+    const elapsed = now - eyeClosedStart;
+
+    if (elapsed >= EYE_CLOSED_SECONDS && !alarmActive) {
+      alarmActive = true;
+      alarmCount++;
+      startAlarm();
+    }
+
+    updateStats(ear, elapsed);
+    if (alarmActive) {
+      setStatus('alarm', '🚨 SLEEPING! WAKE UP!');
+      flash.classList.add('active');
+    } else {
+      setStatus('sleepy', '😪 Eyes closing…');
+      flash.classList.remove('active');
+    }
+  } else {
+    eyeClosedStart = null;
+    if (alarmActive) { alarmActive = false; stopAlarm(); }
+    flash.classList.remove('active');
+    setStatus('awake', '👁️ AWAKE');
+    updateStats(ear, 0);
+  }
+}
+
+function setStatus(cls, text) {
+  badge.className   = cls;
+  badge.textContent = text;
+}
+
+function updateStats(ear, elapsed) {
+  earVal.textContent    = ear.toFixed(3);
+  timerVal.textContent  = elapsed.toFixed(1) + 's';
+  alarmsVal.textContent = alarmCount;
+  const pct = Math.min(elapsed / EYE_CLOSED_SECONDS * 100, 100);
+  progressBar.style.width = pct + '%';
+  progressTxt.textContent = `${elapsed.toFixed(1)}s / ${EYE_CLOSED_SECONDS.toFixed(1)}s`;
+}
+
+// ── Init MediaPipe FaceMesh ────────────────────────────────────────────────
+async function initFaceMesh() {
+  loaderTxt.textContent = 'MediaPipe FaceMesh model load avutundi…';
+  try {
+    faceMesh = new FaceMesh({
+      locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+    faceMesh.setOptions({
+      maxNumFaces: 1, refineLandmarks: true,
+      minDetectionConfidence: 0.6, minTrackingConfidence: 0.6,
+    });
+    faceMesh.onResults(onResults);
+    await faceMesh.initialize();
+    startBtn.disabled    = false;
+    startBtn.textContent = '▶ Start Camera';
+    loaderTxt.textContent = "The model is ready. First, click 'Sound Test' to verify the audio, then start the camera.";
+  } catch(e) {
+    loaderTxt.textContent = '❌ Model load failed: ' + e.message;
+  }
+}
+
+// ── Camera loop ────────────────────────────────────────────────────────────
+async function tick() {
+  if (!running) return;
+  try { await faceMesh.send({ image: video }); } catch(e) {}
+  animId = requestAnimationFrame(tick);
+}
+
+// ── Start / Stop ───────────────────────────────────────────────────────────
+startBtn.addEventListener('click', async () => {
+  // Warm up AudioContext on this user gesture (critical for browsers)
+  getAudioCtx();
+
+  if (running) {
+    running = false;
+    cancelAnimationFrame(animId);
+    stopAlarm();
+    if (video.srcObject) {
+      video.srcObject.getTracks().forEach(t => t.stop());
+      video.srcObject = null;
+    }
+    startBtn.textContent = '▶ Start Camera';
+    setStatus('init', '⏸ Stopped');
+    flash.classList.remove('active');
+    noFaceDiv.classList.remove('show');
+    ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }
+    });
+    video.srcObject = stream;
+    await new Promise(r => { video.onloadedmetadata = r; });
+    await video.play();
+    running = true;
+    startBtn.textContent = '⏹ Stop';
+    setStatus('awake', '👁️ AWAKE');
+    tick();
+  } catch(e) {
+    loaderTxt.textContent = '❌ Camera access denied: ' + e.message;
+  }
+});
+
+initFaceMesh();
+</script>
+</body>
+</html>
